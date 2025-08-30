@@ -15,8 +15,8 @@ chromadb
 sentence-transformers
 
 # PDF Parsing
-PyMuPDF  # backend for PyPDFLoader via langchain_community
-replicate
+PyMuPDF  
+
 
 # Environment Variables
 python-dotenv
@@ -31,6 +31,9 @@ loguru
 # File Uploads
 aiofiles
 
-
+# OCR
+unstructured[local-inference] # Esto instala unstructured con todas las dependencias para PDFs y OCR
+pdf2image
+Pillow
 
 # pip install -r requirements.txt

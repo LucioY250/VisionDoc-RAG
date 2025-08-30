@@ -4,60 +4,56 @@ import os
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
-from langchain.schema.retriever import BaseRetriever
-from langchain.callbacks.manager import CallbackManagerForRetrieverRun
-from langchain.schema.document import Document
-from typing import List
-
-from sentence_transformers import CrossEncoder
+from langchain.prompts import PromptTemplate
+from langchain.retrievers import ParentDocumentRetriever
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.retrievers import ParentDocumentRetriever
 
 load_dotenv()
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY") # Corregí el nombre de la variable (quité la 'S')
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# --- NUEVA CLASE: UN RETRIEVER PERSONALIZADO CON RE-RANKING ---
-class RerankingRetriever(BaseRetriever):
-    vectorstore_retriever: BaseRetriever
-    reranker: CrossEncoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-    k: int = 3 # Número final de documentos a devolver
-
-    def _get_relevant_documents(
-        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
-    ) -> List[Document]:
-        # 1. Obtenemos más documentos de los necesarios del vectorstore
-        initial_docs = self.vectorstore_retriever.get_relevant_documents(query)
-
-        if not initial_docs:
-            return []
-
-        # 2. Preparamos los pares para el re-ranking
-        pairs = [[query, doc.page_content] for doc in initial_docs]
-        
-        # 3. Calculamos las puntuaciones
-        scores = self.reranker.predict(pairs)
-        
-        # 4. Combinamos, ordenamos y devolvemos los 'k' mejores
-        reranked_docs = list(zip(scores, initial_docs))
-        reranked_docs.sort(key=lambda x: x[0], reverse=True)
-        
-        final_docs = [doc for score, doc in reranked_docs[:self.k]]
-        return final_docs
-
-def get_llm_chain(vectorstore):
+def get_llm_chain(vectorstore, docstore):
+    """
+    Crea la cadena de RAG usando el ParentDocumentRetriever para obtener un contexto de página completa.
+    """
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY,
         model_name="llama3-70b-8192"
     )
 
-    # Creamos un retriever base
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
-    
-    # Envolvemos el retriever base en nuestro retriever personalizado con re-ranking
-    reranking_retriever = RerankingRetriever(vectorstore_retriever=base_retriever)
+    ### MEJORA CRÍTICA: Implementación correcta del ParentDocumentRetriever ###
+    # Este retriever buscará en el vectorstore (chunks pequeños)
+    # pero devolverá los documentos del docstore (páginas completas),
+    # dándole al LLM un contexto mucho más rico.
+    parent_retriever = ParentDocumentRetriever(
+        vectorstore=vectorstore,
+        docstore=docstore,
+        child_splitter=RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50),
+        parent_id_key="doc_id" 
+    )
+
+    template = """
+    Eres un asistente experto en análisis de documentos. Tu tarea es responder la pregunta del usuario basándote ÚNICA Y EXCLUSIVAMENTE en el siguiente contexto extraído de una o varias páginas de un documento.
+    Sintetiza la información para dar una respuesta completa y coherente.
+    Si el contexto contiene el texto de un diagrama o una arquitectura, descríbela en detalle.
+    No inventes información. Si la respuesta no está en el contexto, di "Basado en el contexto proporcionado, no tengo la información para responder a esa pregunta."
+    Al final de tu respuesta, cita SIEMPRE la página del documento de la que obtuviste la información, por ejemplo: [Fuente: Página 4].
+
+    CONTEXTO:
+    {context}
+
+    PREGUNTA:
+    {question}
+
+    RESPUESTA DETALLADA:
+    """
+    QA_CHAIN_PROMPT = PromptTemplate.from_template(template)
 
     return RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=reranking_retriever, # Usamos nuestro nuevo retriever
-        return_source_documents=True
+        retriever=parent_retriever, # <<< USAMOS EL RETRIEVER CORRECTO
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": QA_CHAIN_PROMPT}
     )

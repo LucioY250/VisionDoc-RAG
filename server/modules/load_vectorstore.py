@@ -1,114 +1,82 @@
 # En modules/load_vectorstore.py
 
-# --- IMPORTS NECESARIOS ---
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 import fitz  # PyMuPDF
-import replicate # Volvemos a usar Replicate
-from langchain.vectorstores import Chroma
-from langchain.embeddings import HuggingFaceBgeEmbeddings
+import uuid
+from unstructured.partition.pdf import partition_pdf
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document
+from langchain.storage import InMemoryStore
 
 load_dotenv()
 
-# --- CONFIGURACIÓN ---
-PERSIST_DIR = "./chroma_store"
-UPLOAD_DIR = "./uploaded_pdfs"
-IMAGE_SAVE_DIR = "./static/images"
+# --- MEJORA: Manejo de rutas robusto y centralizado ---
+SERVER_ROOT = Path(__file__).parent.parent
+PERSIST_DIR = SERVER_ROOT / "chroma_store"
+UPLOAD_DIR = SERVER_ROOT / "uploaded_pdfs"
+IMAGE_SAVE_DIR = SERVER_ROOT / "static" / "images"
+
+# Aseguramos que los directorios existan al cargar el módulo
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
-# ==============================================================================
-# FUNCIÓN DE DESCRIPCIÓN DE IMÁGENES CON REPLICATE (ACTUALIZADA Y FIABLE)
-# ==============================================================================
-def describe_image_with_replicate(image_path: str) -> str:
-    print(f"Describiendo imagen con Replicate (Modelo: BakLLaVA): {image_path}")
-    try:
-        with open(image_path, "rb") as image_file:
-            # Usamos el identificador exacto y verificado que encontraste
-            model_version = "lucataco/bakllava:452b2fa0b66d8acdf40e05a7f0af948f9c6065f6da5af22fce4cead99a26ff3d"
-            
-            output = replicate.run(
-                model_version,
-                input={
-                    "image": image_file,
-                    "question": "Describe this image in detail. If it is a diagram or a chart, explain its components, labels, and the relationships between them."
-                    # Nota: Este modelo usa el parámetro "question" en lugar de "prompt"
-                }
-            )
-            # BakLLaVA devuelve una única cadena, no un generador, así que esto es más directo
-            description = output
-            
-            print(f"Descripción generada: {description[:150]}...")
-            return description
-    except Exception as e:
-        if "402" in str(e):
-             print("\nERROR CRÍTICO: Error 402 - Crédito Insuficiente. Revisa tu cuenta de Replicate.")
-        else:
-             print(f"Error describiendo la imagen {image_path} con Replicate: {e}")
-        return "No description could be generated for this image."
-# ==============================================================================
-# FUNCIÓN DE INGESTIÓN PRINCIPAL
-# ==============================================================================
 def load_vectorstore(uploaded_files):
     file_paths = []
     for file in uploaded_files:
-        save_path = Path(UPLOAD_DIR) / file.filename
-        with open(save_path, "wb") as f:
-            f.write(file.file.read())
+        save_path = UPLOAD_DIR / file.filename
+        with open(save_path, "wb") as f: f.write(file.file.read())
         file_paths.append(str(save_path))
 
-    all_docs_to_process = []
+    all_pages = []
+    parent_ids = [] # << NUEVA LISTA para guardar los IDs de los padres
     for path in file_paths:
-        pdf_doc = fitz.open(path)
         filename = os.path.basename(path)
+        print(f"Procesando documento con Unstructured: {path}")
+        elements = partition_pdf(path, strategy="hi_res", infer_table_structure=True)
 
-        # Extraer TEXTO
+        pages_content = {}
+        for el in elements:
+            page_num = el.metadata.page_number
+            if page_num not in pages_content: pages_content[page_num] = ""
+            pages_content[page_num] += "\n\n" + str(el)
+
+        for page_num, content in pages_content.items():
+            parent_id = str(uuid.uuid4()) # << Generamos un ID único para cada página
+            parent_ids.append(parent_id)
+            metadata = {"source": filename, "page_number": page_num, "doc_id": parent_id}
+            all_pages.append(Document(page_content=content, metadata=metadata))
+
+        # Guardar imágenes (sin cambios)
+        pdf_doc = fitz.open(path)
         for page_num, page in enumerate(pdf_doc):
-            text = page.get_text()
-            if text:
-                metadata = {"source": filename, "page": page_num + 1, "type": "text"}
-                all_docs_to_process.append(Document(page_content=text, metadata=metadata))
+            pix = page.get_pixmap(dpi=200)
+            image_filename = f"{os.path.splitext(filename)[0]}_p{page_num + 1}_full.png"
+            image_path = IMAGE_SAVE_DIR / image_filename
+            pix.save(image_path)
 
-        # Extraer IMÁGENES
-        for page_num, page in enumerate(pdf_doc):
-            for img_index, img in enumerate(page.get_images(full=True)):
-                xref = img[0]
-                base_image = pdf_doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                
-                image_filename = f"{os.path.splitext(filename)[0]}_p{page_num+1}_img{img_index}.png"
-                image_path = os.path.join(IMAGE_SAVE_DIR, image_filename)
-                with open(image_path, "wb") as f:
-                    f.write(image_bytes)
-                
-                # Usamos nuestra función de Replicate
-                description = describe_image_with_replicate(image_path)
-                
-                metadata = {
-                    "source": filename, 
-                    "page": page_num + 1, 
-                    "type": "image",
-                    "image_path": image_path
-                }
-                all_docs_to_process.append(Document(page_content=description, metadata=metadata))
+    # El text splitter ahora crea los "chunks hijos"
+    child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)
+    
+    # --- LA CORRECCIÓN CRÍTICA ---
+    # Dividimos los documentos y asignamos los IDs de los padres a los hijos
+    sub_docs = []
+    for i, doc in enumerate(all_pages):
+        _id = parent_ids[i]
+        _sub_docs = child_splitter.split_documents([doc])
+        for _doc in _sub_docs:
+            _doc.metadata["doc_id"] = _id
+        sub_docs.extend(_sub_docs)
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    texts = splitter.split_documents(all_docs_to_process)
+    embeddings = HuggingFaceBgeEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    
+    vectorstore = Chroma.from_documents(sub_docs, embeddings, persist_directory=str(PERSIST_DIR))
+    
+    docstore = InMemoryStore()
+    docstore.mset(list(zip(parent_ids, all_pages))) # <<< Usamos los IDs para el docstore
 
-    embeddings = HuggingFaceBgeEmbeddings(model_name="all-MiniLM-L12-v2")
-
-    if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
-        vectorstore = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
-        vectorstore.add_documents(texts)
-    else:
-        vectorstore = Chroma.from_documents(
-            documents=texts,
-            embedding=embeddings,
-            persist_directory=PERSIST_DIR
-        )
-
-    print("Proceso de ingestión completado.")
-    return vectorstore
+    print("Proceso de ingestión con Parent-Document (con IDs) completado.")
+    return vectorstore, docstore
