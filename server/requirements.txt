@@ -15,7 +15,8 @@ chromadb
 sentence-transformers
 
 # PDF Parsing
-PyPDF  # backend for PyPDFLoader via langchain_community
+PyMuPDF  # backend for PyPDFLoader via langchain_community
+replicate
 
 # Environment Variables
 python-dotenv
