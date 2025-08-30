@@ -10,10 +10,8 @@ from typing import List
 from pathlib import Path
 from fastapi.concurrency import run_in_threadpool
 
-# --- MEJORA: Actualizamos los imports de LangChain ---
 from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings as HuggingFaceBgeEmbeddings
-from langchain.storage import InMemoryStore
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from modules.load_vectorstore import load_vectorstore, PERSIST_DIR
 from modules.llm import get_llm_chain
@@ -21,40 +19,36 @@ from modules.query_handlers import query_chain
 from logger import logger
 
 # ==============================================================================
-# MEJORA CRÍTICA: GESTOR DE CICLO DE VIDA (LIFESPAN)
+# GESTOR DE CICLO DE VIDA (LIFESPAN)
 # ==============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- Código que se ejecuta ANTES de que la app empiece a recibir peticiones (STARTUP) ---
-    logger.info("Iniciando la aplicación y cargando modelos...")
+    # --- Código de Arranque (STARTUP) ---
+    logger.info("Iniciando la aplicación y cargando modelos base...")
     
-    app.state.embeddings = HuggingFaceBgeEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    app.state.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
     
-    if os.path.exists(PERSIST_DIR):
+    # Intentamos cargar el vectorstore existente. Si no existe, la app esperará a que se suba un archivo.
+    if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
         app.state.vectorstore = Chroma(persist_directory=str(PERSIST_DIR), embedding_function=app.state.embeddings)
-        logger.info("Vectorstore existente cargado desde el disco.")
+        app.state.chain = get_llm_chain(app.state.vectorstore)
+        logger.info("Vectorstore existente cargado y cadena de RAG inicializada.")
     else:
         app.state.vectorstore = None
-        logger.warning("No se encontró un vectorstore existente. Se creará en la primera subida.")
-
-    app.state.docstore = InMemoryStore()
-    
-    if app.state.vectorstore:
-        app.state.chain = get_llm_chain(app.state.vectorstore, app.state.docstore)
-        logger.info("Cadena de RAG inicializada.")
-    else:
         app.state.chain = None
+        logger.warning("No se encontró un vectorstore. El sistema está en espera hasta la subida de un documento.")
 
     logger.info("¡Aplicación lista para recibir peticiones!")
     
-    yield  # La aplicación se ejecuta aquí
+    yield
     
-    # --- Código que se ejecuta CUANDO la app se apaga (SHUTDOWN) ---
-    logger.info("La aplicación se está apagando. Limpiando recursos si es necesario.")
-    # (Aquí iría código para cerrar conexiones a bases de datos, etc.)
+    # --- Código de Apagado (SHUTDOWN) ---
+    logger.info("La aplicación se está apagando.")
 
 
-# --- CONECTAMOS EL LIFESPAN A LA APP DE FASTAPI ---
+# ==============================================================================
+# CONFIGURACIÓN DE LA APLICACIÓN FASTAPI
+# ==============================================================================
 app = FastAPI(title="VisionDoc-RAG", lifespan=lifespan)
 
 SERVER_ROOT = Path(__file__).parent
@@ -76,7 +70,9 @@ async def catch_exception_middleware(request: Request, call_next):
         logger.exception("UNHANDLED EXCEPTION")
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
-# El resto de los endpoints no necesitan ningún cambio
+# ==============================================================================
+# ENDPOINTS DE LA API
+# ==============================================================================
 @app.post("/upload_pdfs/")
 async def upload_pdfs(files: List[UploadFile] = File(...)):
     if not files:
@@ -84,11 +80,12 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
     try:
         logger.info(f"Recibidos {len(files)} archivos para procesar en segundo plano.")
         
-        new_vectorstore, new_docstore = await run_in_threadpool(load_vectorstore, files)
+        # El pipeline de ingestión ahora solo devuelve el vectorstore.
+        new_vectorstore = await run_in_threadpool(load_vectorstore, files)
         
+        # Actualizamos el estado de la aplicación.
         app.state.vectorstore = new_vectorstore
-        app.state.docstore = new_docstore
-        app.state.chain = get_llm_chain(app.state.vectorstore, app.state.docstore)
+        app.state.chain = get_llm_chain(app.state.vectorstore)
         
         logger.info("Vectorstore recargado y cadena actualizada tras la ingestión.")
         return {"message": "Archivos procesados y vectorstore actualizado."}
