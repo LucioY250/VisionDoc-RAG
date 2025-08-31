@@ -28,8 +28,8 @@ os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
 # --- HERRAMIENTAS DE PROCESAMIENTO (SINGLETONS) ---
 # Cargamos los modelos una sola vez para reutilizarlos.
-embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-groq_llm = ChatGroq(groq_api_key=os.environ.get("GROQ_API_KEY"), model_name="llama3-8b-8192", temperature=0)
+embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-en-v1.5")
+groq_llm = ChatGroq(groq_api_key=os.environ.get("GROQ_API_KEY"), model_name="llama-3.1-8b-instant", temperature=0)
 
 # ==============================================================================
 # FUNCIONES DE ENRIQUECIMIENTO (EL NÚCLEO MULTI-VECTOR)
@@ -87,10 +87,10 @@ def load_vectorstore(uploaded_files):
             f.write(file.file.read())
         file_paths.append(str(save_path))
 
-    docs_for_vectorstore = []
+    hybrid_docs_for_vectorstore = []
     for path in file_paths:
         filename = os.path.basename(path)
-        print(f"Iniciando procesamiento Multi-Vector para: {path}")
+        print(f"Iniciando procesamiento Híbrido para: {path}")
 
         # 1. Extracción de texto de alta calidad con Unstructured
         elements = partition_pdf(path, strategy="hi_res", infer_table_structure=True)
@@ -105,36 +105,40 @@ def load_vectorstore(uploaded_files):
 
         # 3. Guardado de la imagen visual de cada página
         pdf_doc = fitz.open(path)
-        for page_num, page in enumerate(pdf_doc):
+        for page_num_fitz, page in enumerate(pdf_doc):
+            page_num = page_num_fitz + 1
             pix = page.get_pixmap(dpi=200)
-            image_filename = f"{os.path.splitext(filename)[0]}_p{page_num + 1}_full.png"
+            image_filename = f"{os.path.splitext(filename)[0]}_p{page_num}_full.png"
             image_path = IMAGE_SAVE_DIR / image_filename
             pix.save(image_path)
         print(f"Guardadas {len(pdf_doc)} imágenes de página para {filename}.")
 
-        # 4. Generación y almacenamiento de MÚLTIPLES representaciones por página
+        # --- LÓGICA DE FUSIÓN ---
         for page_num, content in pages_content.items():
             image_path = IMAGE_SAVE_DIR / f"{os.path.splitext(filename)[0]}_p{page_num}_full.png"
             
-            # --- Representación 1: Resumen del Texto (Anzuelo Conceptual) ---
+            # 1. Generamos ambas representaciones
             text_summary = summarize_text(content, filename, page_num)
-            docs_for_vectorstore.append(Document(
-                page_content=text_summary,
-                metadata={"source": filename, "page_number": page_num, "content_type": "text_summary"}
-            ))
+            visual_summary = describe_image(str(image_path), filename, page_num)
+
+            # 2. Las fusionamos en un único súper-contexto
+            fused_content = f"""
+            [RESUMEN TEXTUAL DE LA PÁGINA {page_num}]:
+            {text_summary}
             
-            # --- Representación 2: Resumen Visual (Anzuelo Estructural) ---
-            if image_path.exists():
-                visual_summary = describe_image(str(image_path), filename, page_num)
-                docs_for_vectorstore.append(Document(
-                    page_content=visual_summary,
-                    metadata={"source": filename, "page_number": page_num, "content_type": "visual_summary"}
-                ))
+            [DESCRIPCIÓN VISUAL DE LA PÁGINA {page_num}]:
+            {visual_summary}
+            """
+            
+            # 3. Creamos UN SOLO Document por página
+            hybrid_docs_for_vectorstore.append(Document(
+                page_content=fused_content,
+                metadata={"source": filename, "page_number": page_num}
+            ))
 
-    # 5. Creación del Vectorstore único con todas las representaciones
-    # Se sobrescribe el vectorstore en cada subida para este reto.
-    vectorstore = Chroma.from_documents(docs_for_vectorstore, embeddings, persist_directory=str(PERSIST_DIR))
+    # Creamos el Vectorstore con los documentos híbridos
+    vectorstore = Chroma.from_documents(hybrid_docs_for_vectorstore, embeddings, persist_directory=str(PERSIST_DIR))
 
-    print("Proceso de ingestión con Multi-Vector Retriever completado.")
-    # Ya no necesitamos el docstore, el retriever simple es suficiente ahora
+    print("Proceso de ingestión con Contexto Fusionado completado.")
+    # Ya no se necesita docstore, hemos vuelto a un modelo más simple y potente
     return vectorstore

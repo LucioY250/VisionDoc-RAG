@@ -26,12 +26,12 @@ async def lifespan(app: FastAPI):
     # --- Código de Arranque (STARTUP) ---
     logger.info("Iniciando la aplicación y cargando modelos base...")
     
-    app.state.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    # Sincronizamos con el modelo usado en la ingestión
+    app.state.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-en-v1.5")
     
-    # Intentamos cargar el vectorstore existente. Si no existe, la app esperará a que se suba un archivo.
     if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
         app.state.vectorstore = Chroma(persist_directory=str(PERSIST_DIR), embedding_function=app.state.embeddings)
-        app.state.chain = get_llm_chain(app.state.vectorstore)
+        app.state.chain = get_llm_chain(app.state.vectorstore) # <<< SIMPLIFICADO
         logger.info("Vectorstore existente cargado y cadena de RAG inicializada.")
     else:
         app.state.vectorstore = None
@@ -44,7 +44,6 @@ async def lifespan(app: FastAPI):
     
     # --- Código de Apagado (SHUTDOWN) ---
     logger.info("La aplicación se está apagando.")
-
 
 # ==============================================================================
 # CONFIGURACIÓN DE LA APLICACIÓN FASTAPI
@@ -85,7 +84,7 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
         
         # Actualizamos el estado de la aplicación.
         app.state.vectorstore = new_vectorstore
-        app.state.chain = get_llm_chain(app.state.vectorstore)
+        app.state.chain = get_llm_chain(app.state.vectorstore) # <<< SIMPLIFICADO
         
         logger.info("Vectorstore recargado y cadena actualizada tras la ingestión.")
         return {"message": "Archivos procesados y vectorstore actualizado."}
