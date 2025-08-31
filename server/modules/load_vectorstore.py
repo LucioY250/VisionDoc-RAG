@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import fitz  # PyMuPDF
 import replicate
 from unstructured.partition.pdf import partition_pdf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -20,90 +21,71 @@ SERVER_ROOT = Path(__file__).parent.parent
 PERSIST_DIR = SERVER_ROOT / "chroma_store"
 UPLOAD_DIR = SERVER_ROOT / "uploaded_pdfs"
 IMAGE_SAVE_DIR = SERVER_ROOT / "static" / "images"
-
-# Aseguramos que los directorios existan al cargar el módulo
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
-
-# --- HERRAMIENTAS DE PROCESAMIENTO (SINGLETONS) ---
-# Cargamos los modelos una sola vez para reutilizarlos.
+# --- HERRAMIENTAS DE PROCESAMIENTO (MÁXIMA CALIDAD) ---
 embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-en-v1.5")
-groq_llm = ChatGroq(groq_api_key=os.environ.get("GROQ_API_KEY"), model_name="llama-3.1-8b-instant", temperature=0)
+groq_llm = ChatGroq(groq_api_key=os.environ.get("GROQ_API_KEY"), model_name="llama-3.3-70b-versatile", temperature=0)
 
 # ==============================================================================
-# FUNCIONES DE ENRIQUECIMIENTO (EL NÚCLEO MULTI-VECTOR)
+# FUNCIONES DE ENRIQUECIMIENTO
 # ==============================================================================
-
-def summarize_text(text: str, filename: str, page_num: int) -> str:
-    """Usa un LLM rápido para limpiar y resumir el texto de OCR en un párrafo coherente."""
-    print(f"Resumiendo texto de {filename}, página {page_num}...")
-    prompt = f"""
-    Eres un experto en síntesis de información. El siguiente texto fue extraído de la página {page_num} del documento '{filename}' mediante OCR. 
-    Tu tarea es limpiarlo, corregir errores evidentes y resumirlo en un párrafo conciso y denso en información que capture la esencia de la página.
-    No añadas información que no esté presente.
-    
-    Texto extraído:
-    ```{text}```
-    
-    Resumen coherente:
-    """
+def summarize_text(content, filename, page_num):
+    print(f"Resumiendo texto de {filename}, pág {page_num}...")
+    prompt = f"Resume el siguiente texto extraído de la página {page_num} del documento '{filename}' en un párrafo conciso y denso en información. Texto: ```{content}```"
     try:
-        summary = groq_llm.invoke(prompt).content
-        print(f"Resumen de texto generado para página {page_num}.")
-        return summary
+        return groq_llm.invoke(prompt).content
     except Exception as e:
-        print(f"Error al resumir texto de página {page_num}: {e}")
-        return text  # Si falla, devuelve el texto original
+        print(f"Error al resumir pág {page_num}: {e}")
+        return content
 
-def describe_image(image_path: str, filename: str, page_num: int) -> str:
-    """Usa un VLM (BakLLaVA en Replicate) para describir la estructura visual de una imagen."""
-    print(f"Describiendo visualmente {filename}, página {page_num}...")
+def describe_image(image_path, filename, page_num):
+    print(f"Describiendo visualmente {filename}, pág {page_num}...")
     try:
         with open(image_path, "rb") as image_file:
             model_version = "lucataco/bakllava:452b2fa0b66d8acdf40e05a7f0af948f9c6065f6da5af22fce4cead99a26ff3d"
-            output = replicate.run(
-                model_version,
-                input={
-                    "image": image_file,
-                    "question": f"This is page {page_num} of the document '{filename}'. Describe the visual layout and structure. Identify key elements like diagrams, charts, tables, or important headings. Do not transcribe the text."
-                }
-            )
-            print(f"Descripción visual generada para página {page_num}.")
+            output = replicate.run(model_version, input={"image": image_file, "question": f"This is page {page_num} of the document '{filename}'. Describe the visual layout, structure, and key elements like diagrams or charts. Do not transcribe text."})
             return output
     except Exception as e:
-        print(f"Error al describir imagen de página {page_num}: {e}")
+        print(f"Error al describir pág {page_num}: {e}")
         return "No visual description could be generated."
 
-# ==============================================================================
-# FUNCIÓN DE INGESTIÓN PRINCIPAL (PIPELINE MULTI-VECTOR)
-# ==============================================================================
+def process_page(page_data):
+    """Función que procesa una única página para ser ejecutada en paralelo."""
+    content, filename, page_num, image_path = page_data
+    
+    text_summary = summarize_text(content, filename, page_num)
+    visual_summary = describe_image(str(image_path), filename, page_num)
 
+    fused_content = f"[RESUMEN TEXTUAL DE LA PÁGINA {page_num}]:\n{text_summary}\n\n[DESCRIPCIÓN VISUAL DE LA PÁGINA {page_num}]:\n{visual_summary}"
+    
+    return Document(
+        page_content=fused_content,
+        metadata={"source": filename, "page_number": page_num}
+    )
+
+# ==============================================================================
+# FUNCIÓN DE INGESTIÓN PRINCIPAL (HÍBRIDA Y PARALELA)
+# ==============================================================================
 def load_vectorstore(uploaded_files):
-    file_paths = []
-    for file in uploaded_files:
-        save_path = UPLOAD_DIR / file.filename
-        with open(save_path, "wb") as f:
-            f.write(file.file.read())
-        file_paths.append(str(save_path))
+    file_paths = [str(UPLOAD_DIR / f.filename) for f in uploaded_files]
+    for file, path in zip(uploaded_files, file_paths):
+        with open(path, "wb") as f: f.write(file.file.read())
 
-    hybrid_docs_for_vectorstore = []
+    hybrid_docs = []
     for path in file_paths:
         filename = os.path.basename(path)
-        print(f"Iniciando procesamiento Híbrido para: {path}")
+        print(f"Iniciando procesamiento Híbrido y Paralelo para: {path}")
 
-        # 1. Extracción de texto de alta calidad con Unstructured
         elements = partition_pdf(path, strategy="hi_res", infer_table_structure=True)
-        
-        # 2. Agrupación del contenido de texto por página
         pages_content = {}
         for el in elements:
             page_num = el.metadata.page_number
-            if page_num not in pages_content:
-                pages_content[page_num] = ""
+            if page_num not in pages_content: pages_content[page_num] = ""
             pages_content[page_num] += "\n\n" + str(el)
-
-        # 3. Guardado de la imagen visual de cada página
+        
+        tasks = []
         pdf_doc = fitz.open(path)
         for page_num_fitz, page in enumerate(pdf_doc):
             page_num = page_num_fitz + 1
@@ -111,34 +93,29 @@ def load_vectorstore(uploaded_files):
             image_filename = f"{os.path.splitext(filename)[0]}_p{page_num}_full.png"
             image_path = IMAGE_SAVE_DIR / image_filename
             pix.save(image_path)
-        print(f"Guardadas {len(pdf_doc)} imágenes de página para {filename}.")
-
-        # --- LÓGICA DE FUSIÓN ---
-        for page_num, content in pages_content.items():
-            image_path = IMAGE_SAVE_DIR / f"{os.path.splitext(filename)[0]}_p{page_num}_full.png"
             
-            # 1. Generamos ambas representaciones
-            text_summary = summarize_text(content, filename, page_num)
-            visual_summary = describe_image(str(image_path), filename, page_num)
+            # Extraemos y guardamos imágenes específicas (diagramas)
+            for img_index, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                if xref:
+                    img_pix = fitz.Pixmap(pdf_doc, xref)
+                    if img_pix.n - img_pix.alpha >= 3: # Solo imágenes a color, no máscaras
+                         img_filename_specific = f"{os.path.splitext(filename)[0]}_p{page_num}_img{img_index}.png"
+                         img_path_specific = IMAGE_SAVE_DIR / img_filename_specific
+                         img_pix.save(img_path_specific)
 
-            # 2. Las fusionamos en un único súper-contexto
-            fused_content = f"""
-            [RESUMEN TEXTUAL DE LA PÁGINA {page_num}]:
-            {text_summary}
-            
-            [DESCRIPCIÓN VISUAL DE LA PÁGINA {page_num}]:
-            {visual_summary}
-            """
-            
-            # 3. Creamos UN SOLO Document por página
-            hybrid_docs_for_vectorstore.append(Document(
-                page_content=fused_content,
-                metadata={"source": filename, "page_number": page_num}
-            ))
+            if page_num in pages_content:
+                tasks.append((pages_content[page_num], filename, page_num, image_path))
+        
+        # --- LA MAGIA DE LA PARALELIZACIÓN ---
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_page = {executor.submit(process_page, task): task for task in tasks}
+            for future in as_completed(future_to_page):
+                try:
+                    hybrid_docs.append(future.result())
+                except Exception as exc:
+                    print(f"Una tarea de procesamiento generó un error: {exc}")
 
-    # Creamos el Vectorstore con los documentos híbridos
-    vectorstore = Chroma.from_documents(hybrid_docs_for_vectorstore, embeddings, persist_directory=str(PERSIST_DIR))
-
-    print("Proceso de ingestión con Contexto Fusionado completado.")
-    # Ya no se necesita docstore, hemos vuelto a un modelo más simple y potente
+    vectorstore = Chroma.from_documents(hybrid_docs, embeddings, persist_directory=str(PERSIST_DIR))
+    print("Proceso de ingestión Híbrido y Paralelo completado.")
     return vectorstore
