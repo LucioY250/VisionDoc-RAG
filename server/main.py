@@ -14,40 +14,33 @@ from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
 from modules.load_vectorstore import load_vectorstore, PERSIST_DIR
-from modules.llm import get_llm_chain
+from modules.llm import get_text_rag_chain
 from modules.query_handlers import query_chain
 from logger import logger
 
-# ==============================================================================
-# GESTOR DE CICLO DE VIDA (LIFESPAN)
-# ==============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- Código de Arranque (STARTUP) ---
-    logger.info("Iniciando la aplicación y cargando modelos base...")
+    """
+    Gestiona la carga de modelos al inicio de la aplicación.
+    """
+    logger.info("Starting application and loading base models...")
     
-    # Sincronizamos con el modelo usado en la ingestión
-    app.state.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-en-v1.5")
+    # --- UPGRADE FINAL: Usamos el embedding de alta definición para máxima precisión ---
+    app.state.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
     
     if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
         app.state.vectorstore = Chroma(persist_directory=str(PERSIST_DIR), embedding_function=app.state.embeddings)
-        app.state.chain = get_llm_chain(app.state.vectorstore) # <<< SIMPLIFICADO
-        logger.info("Vectorstore existente cargado y cadena de RAG inicializada.")
+        app.state.chain = get_text_rag_chain(app.state.vectorstore)
+        logger.info("Existing vectorstore loaded and RAG chain initialized.")
     else:
         app.state.vectorstore = None
         app.state.chain = None
-        logger.warning("No se encontró un vectorstore. El sistema está en espera hasta la subida de un documento.")
+        logger.warning("No vectorstore found. System is waiting for a document upload.")
 
-    logger.info("¡Aplicación lista para recibir peticiones!")
-    
+    logger.info("Application ready to receive requests!")
     yield
-    
-    # --- Código de Apagado (SHUTDOWN) ---
-    logger.info("La aplicación se está apagando.")
+    logger.info("Application is shutting down.")
 
-# ==============================================================================
-# CONFIGURACIÓN DE LA APLICACIÓN FASTAPI
-# ==============================================================================
 app = FastAPI(title="VisionDoc-RAG", lifespan=lifespan)
 
 SERVER_ROOT = Path(__file__).parent
@@ -56,7 +49,7 @@ app.mount("/static", StaticFiles(directory=SERVER_ROOT / "static"), name="static
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -69,40 +62,32 @@ async def catch_exception_middleware(request: Request, call_next):
         logger.exception("UNHANDLED EXCEPTION")
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
-# ==============================================================================
-# ENDPOINTS DE LA API
-# ==============================================================================
 @app.post("/upload_pdfs/")
 async def upload_pdfs(files: List[UploadFile] = File(...)):
     if not files:
-        return JSONResponse(status_code=400, content={"error": "No se subieron archivos."})
+        return JSONResponse(status_code=400, content={"error": "No files were uploaded."})
     try:
-        logger.info(f"Recibidos {len(files)} archivos para procesar en segundo plano.")
-        
-        # El pipeline de ingestión ahora solo devuelve el vectorstore.
+        logger.info(f"Received {len(files)} files for background processing.")
         new_vectorstore = await run_in_threadpool(load_vectorstore, files)
-        
-        # Actualizamos el estado de la aplicación.
         app.state.vectorstore = new_vectorstore
-        app.state.chain = get_llm_chain(app.state.vectorstore) # <<< SIMPLIFICADO
-        
-        logger.info("Vectorstore recargado y cadena actualizada tras la ingestión.")
-        return {"message": "Archivos procesados y vectorstore actualizado."}
+        app.state.chain = get_text_rag_chain(app.state.vectorstore)
+        logger.info("Vectorstore reloaded and chain updated after ingestion.")
+        return {"message": "Files processed and vectorstore updated."}
     except Exception as e:
-        logger.exception("Error durante la subida de PDF")
+        logger.exception("Error during PDF upload")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/ask/")
 async def ask_question(question: str = Form(...)):
     if not app.state.chain:
-        return JSONResponse(status_code=400, content={"error": "El sistema no está listo. Por favor, suba documentos primero."})
+        return JSONResponse(status_code=400, content={"error": "The system is not ready. Please upload documents first."})
     try:
-        logger.info(f"Consulta de usuario: {question}")
+        logger.info(f"User query: {question}")
         result = await run_in_threadpool(query_chain, app.state.chain, question)
-        logger.info("Consulta exitosa.")
+        logger.info("Query successful.")
         return result
     except Exception as e:
-        logger.exception("Error procesando la pregunta")
+        logger.exception("Error processing question")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/test")
