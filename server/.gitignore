@@ -1,4 +1,24 @@
-/uploaded_pdfs
-/chroma_store
-/pycache
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+venv/
+**/venv/
+
+# Application Data (Generated Files)
+server/chroma_store/
+server/uploaded_pdfs/
+server/static/images/
+*.log
+
+# Secrets (CRITICAL)
 .env
+*.env
+
+# IDE and OS specific
+.vscode/
+.idea/
+.DS_Store

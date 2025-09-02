@@ -1,39 +1,32 @@
-# Web Framework
+# === Core Application Framework ===
 fastapi
 uvicorn[standard]
 
-# LangChain & Ecosystem
+# === LangChain Core & LLM Integration ===
 langchain
-langchain-community
 langchain-core
 langchain-groq
+langchain-huggingface  # For HuggingFace embeddings integration
 
-# Vectorstore
+# === Vectorstore ===
+langchain-chroma
 chromadb
 
-# Embeddings
+# === Embeddings & Reranking ===
 sentence-transformers
 
-# PDF Parsing
-PyMuPDF  
-
-
-# Environment Variables
-python-dotenv
-
-# Typing & Utilities
-pydantic
-requests
-
-# Logging (optional but recommended)
-loguru
-
-# File Uploads
-aiofiles
-
-# OCR
-unstructured[local-inference] # Esto instala unstructured con todas las dependencias para PDFs y OCR
+# === PDF Processing & OCR ===
+unstructured[local-inference] # Main engine for OCR and text extraction
 pdf2image
+PyMuPDF                 # Efficiently saves page/sub-images
 Pillow
 
-# pip install -r requirements.txt
+# === External AI Services ===
+replicate               # For VLM image description
+
+# === Utilities ===
+python-dotenv
+pydantic
+requests
+loguru
+aiofiles

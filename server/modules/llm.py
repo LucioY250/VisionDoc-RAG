@@ -1,7 +1,9 @@
-# En modules/llm.py
+# modules/llm.py
+
 import os
 from dotenv import load_dotenv
 from typing import List
+
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
@@ -14,14 +16,22 @@ load_dotenv()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 class RerankingRetriever(BaseRetriever):
+    """
+    A two-stage retriever that first fetches a broad set of documents from a
+    vector store (recall) and then uses a powerful Cross-Encoder to re-rank
+    them for maximum relevance (precision).
+    """
     vectorstore_retriever: BaseRetriever
     reranker: CrossEncoder = CrossEncoder('BAAI/bge-reranker-v2-m3')
-    top_k: int = 3
+    top_k: int = 3  # Final number of documents to pass to the LLM
 
     def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> List[Document]:
+        # Stage 1: Broad-phase retrieval
         initial_docs = self.vectorstore_retriever.get_relevant_documents(query)
-        if not initial_docs: return []
+        if not initial_docs:
+            return []
         
+        # Stage 2: Re-ranking for precision
         pairs = [[query, doc.page_content] for doc in initial_docs]
         scores = self.reranker.predict(pairs)
         
@@ -34,11 +44,17 @@ class RerankingRetriever(BaseRetriever):
         return final_docs
 
 def get_rag_chain(vectorstore):
-    """Crea la cadena de RAG de alta calidad."""
+    """
+    Constructs the high-quality RAG chain.
+    """
+    # Use the most powerful model for final answer generation
     llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama-3.3-70b-versatile", temperature=0)
+    
+    # The retriever fetches a larger number of candidates for the reranker to process
     base_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
     reranking_retriever = RerankingRetriever(vectorstore_retriever=base_retriever)
 
+    # This prompt template is the "brain" of the chatbot, instructing it on how to behave.
     template = """
     You are a world-class document analysis expert. Your task is to provide a detailed and precise answer to the user's question based ONLY on the following context.
     The context consists of fused textual and visual summaries from document pages. Synthesize all information for a complete answer.
@@ -56,4 +72,10 @@ def get_rag_chain(vectorstore):
     """
     QA_CHAIN_PROMPT = PromptTemplate.from_template(template)
 
-    return RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=reranking_retriever, return_source_documents=True, chain_type_kwargs={"prompt": QA_CHAIN_PROMPT})
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=reranking_retriever,
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": QA_CHAIN_PROMPT}
+    )

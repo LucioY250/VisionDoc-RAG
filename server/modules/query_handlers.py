@@ -1,4 +1,5 @@
-# En modules/query_handlers.py
+# modules/query_handlers.py
+
 import os
 from pathlib import Path
 from logger import logger
@@ -9,12 +10,19 @@ SERVER_ROOT = Path(__file__).parent.parent
 BASE_URL = "http://127.0.0.1:8000"
 
 def user_wants_image(user_input: str) -> bool:
-    keywords = ["show me", "diagram", "image", "graph", "architecture", "flow", "what does it look like", "muéstrame", "enséñame", "diagrama", "imagen", "gráfico", "arquitectura", "flujo"]
+    """
+    Determines if the user's query implies a visual intent using keywords.
+    """
+    keywords = [
+        "show me", "diagram", "image", "graph", "architecture", "flow", "what does it look like",
+        "muéstrame", "enséñame", "diagrama", "imagen", "gráfico", "arquitectura", "flujo", "cómo se ve"
+    ]
     return any(keyword in user_input.lower() for keyword in keywords)
 
 def query_chain(chain, user_input: str):
     """
-    Orquesta el RAG de una sola etapa, mostrando la imagen específica más relevante solo cuando es necesario.
+    Orchestrates the RAG query, handling multimodal responses by constructing
+    an image URL if visual intent is detected in the query.
     """
     try:
         logger.debug(f"Executing High-Quality RAG for: {user_input}")
@@ -26,10 +34,14 @@ def query_chain(chain, user_input: str):
         if source_documents and user_wants_image(user_input):
             top_doc = source_documents[0]
             metadata = top_doc.metadata
-            source_filename, page_number = metadata.get("source"), metadata.get("page_number")
+            source_filename = metadata.get("source")
+            page_number = metadata.get("page_number")
 
             if source_filename and page_number:
+                # Default to the full page image as a fallback
                 image_filename_to_show = f"{os.path.splitext(source_filename)[0]}_p{page_number}_full.png"
+                
+                # Heuristic: Find the largest sub-image on the relevant page and display it
                 pdf_path = UPLOAD_DIR / source_filename
                 if pdf_path.exists():
                     pdf_doc = fitz.open(pdf_path)
@@ -45,7 +57,11 @@ def query_chain(chain, user_input: str):
                 image_url = f"{BASE_URL}/{relative_path}"
                 logger.debug(f"Displaying specific image: {image_filename_to_show}")
 
-        return {"response": result["result"], "sources": [doc.metadata.get("source", "N/A") for doc in source_documents], "image_url": image_url}
+        return {
+            "response": result["result"],
+            "sources": [doc.metadata.get("source", "N/A") for doc in source_documents],
+            "image_url": image_url
+        }
     except Exception as e:
         logger.exception("Error in query_chain")
         raise

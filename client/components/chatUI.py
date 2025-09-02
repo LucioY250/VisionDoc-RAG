@@ -1,31 +1,37 @@
-# En components/chatUI.py
+# /components/chatUI.py
+
 import streamlit as st
-from utils.api import ask_question # Usamos la función de consulta estándar
+from utils.api import ask_question
+import requests
 
 def render_chat():
+    """
+    Renders the main chat interface, including history and user input handling.
+    """
     st.header("💬 Chat with your documents")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Renderizar el historial de chat
+    # Display chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg.get("image_url"):
                 st.image(msg["image_url"])
             if msg.get("sources"):
+                # Deduplicate sources and display them cleanly
                 sources_text = ", ".join(list(set(msg["sources"])))
                 st.caption(f"Sources: {sources_text}")
 
-    # Input del usuario
+    # Handle new user input
     if user_input := st.chat_input("Type your question here..."):
         st.session_state.messages.append({"role": "user", "content": user_input})
         st.chat_message("user").markdown(user_input)
 
-        # Llamada al backend estándar (no streaming)
+        # Process and display the assistant's response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking... this may take a moment for complex questions."):
+            with st.spinner("Thinking... This may take a moment for complex questions."):
                 response = ask_question(user_input)
             
             if response.status_code == 200:
@@ -34,7 +40,6 @@ def render_chat():
                 image_url = data.get("image_url")
                 sources = data.get("sources", [])
                 
-                # Renderizar la respuesta
                 st.markdown(answer)
                 if image_url:
                     st.image(image_url)
@@ -42,7 +47,7 @@ def render_chat():
                     sources_text = ", ".join(list(set(sources)))
                     st.caption(f"Sources: {sources_text}")
 
-                # Guardar en el historial
+                # Save the complete response to the session state
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": answer,
