@@ -1,0 +1,3 @@
+# client/requirements.txt
+streamlit
+requests
