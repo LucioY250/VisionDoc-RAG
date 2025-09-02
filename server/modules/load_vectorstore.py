@@ -28,11 +28,7 @@ os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
 # --- Singleton AI Models (loaded once for efficiency) ---
 # State-of-the-art multilingual embedding model for maximum retrieval precision.
-embeddings = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-small-en-v1.5",
-    model_kwargs={'device': 'cpu'},
-    encode_kwargs={'normalize_embeddings': True}
-)
+embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
 # Powerful LLM for high-quality text summarization during ingestion.
 groq_llm = ChatGroq(groq_api_key=os.environ.get("GROQ_API_KEY"), model_name="llama-3.3-70b-versatile", temperature=0)
 
