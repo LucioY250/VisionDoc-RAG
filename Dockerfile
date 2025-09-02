@@ -1,4 +1,4 @@
-### Dockerfile for VisionDoc RAG - Final Version ###
+### Dockerfile for VisionDoc RAG - Final Production Version ###
 
 # 1. Base Image: Use a recent, patched version of Python on Debian.
 FROM python:3.11-slim-bookworm
@@ -17,12 +17,11 @@ COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 5. Copy all necessary application code
+# We only copy the 'server' directory, which is our backend application.
 COPY ./server /app
-COPY ./preloaded_docs /app/preloaded_docs
 
 # 6. Expose Port
 EXPOSE 8000
 
 # 7. Run Command: Start the application.
-# Uvicorn will run as the root user inside the container, which is acceptable for this challenge.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
