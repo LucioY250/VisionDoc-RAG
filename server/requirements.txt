@@ -7,7 +7,7 @@ langchain
 langchain-core
 langchain-groq
 langchain-huggingface  # For HuggingFace embeddings integration
-
+langchain-community
 # === Vectorstore ===
 langchain-chroma
 chromadb
@@ -30,3 +30,4 @@ pydantic
 requests
 loguru
 aiofiles
+boto3
