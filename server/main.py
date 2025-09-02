@@ -27,7 +27,11 @@ async def lifespan(app: FastAPI):
     logger.info("Starting application and loading base models...")
     
     # Ensure embedding model consistency between ingestion and querying
-    app.state.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+    app.state.embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-small-en-v1.5",
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True}
+    )
     
     if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
         app.state.vectorstore = Chroma(persist_directory=str(PERSIST_DIR), embedding_function=app.state.embeddings)
